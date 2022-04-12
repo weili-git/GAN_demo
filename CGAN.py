@@ -6,43 +6,11 @@ import os
 import struct
 import matplotlib.pyplot as plt
 import torchvision.utils as vutils
+from torchvision import datasets, transforms
 
 import torch.nn.functional as F
 
 batchsz = 128
-
-
-def load_mnist(path, kind='train'):
-    """Load MNIST data from `path` https://www.cnblogs.com/xianhan/p/9145966.html"""
-    labels_path = os.path.join(path, '%s-labels.idx1-ubyte' % kind)     # .
-    images_path = os.path.join(path, '%s-images.idx3-ubyte' % kind)
-    with open(labels_path, 'rb') as lbpath:
-        magic, n = struct.unpack('>II',
-                                 lbpath.read(8))
-        labels = np.fromfile(lbpath, dtype=np.uint8)
-
-    with open(images_path, 'rb') as imgpath:
-        magic, num, rows, cols = struct.unpack('>IIII', imgpath.read(16))
-        images = np.fromfile(imgpath, dtype=np.uint8).reshape(len(labels), 784)
-
-    return images, labels
-
-
-def data_generator(imgs, labs, kind='train'):
-    """get a batch of data"""
-    while True:
-        img = []
-        lab = []
-        for _ in range(batchsz):
-            if kind == 'train':
-                i = random.randint(0, 60000 - 1)
-            else:
-                i = random.randint(0, 10000 - 1)
-            img.append(imgs[i])
-            lab.append(labs[i])
-        img = np.array(img, dtype='uint8')
-        lab = np.array(lab, dtype='uint8')
-        yield img, lab
 
 
 class Generator(nn.Module):
@@ -72,37 +40,6 @@ class Generator(nn.Module):
         x = x.view(batchsz, 128, 3, 3)
         x = self.net(x)
         return x
-
-
-# class Discriminator(nn.Module):
-#     def __init__(self):
-#         super(Discriminator, self).__init__()   # floor( (size-kernel+2padding)/stride ) + 1
-#         self.net = nn.Sequential(
-#             # in [1, 28, 28]
-#             nn.Conv2d(1, 64, 4, 2, 1),  # [64, 14, 14]
-#             nn.LeakyReLU(0.1, True),  # overwrite the data
-#             nn.Conv2d(64, 128, 4, 2, 1),  # [128, 7, 7]
-#             nn.LeakyReLU(0.1, True),
-#             nn.Conv2d(128, 512, 7),  # [512, 1, 1]
-#             nn.LeakyReLU(0.1, True),  # linear layer
-#         )
-#         self.fc1 = nn.Sequential(
-#             nn.Linear(10, 512),
-#             nn.LeakyReLU(0.1, True)
-#         )
-#         self.fc2 = nn.Sequential(
-#             nn.Linear(1024, 128),
-#             nn.LeakyReLU(0.1, True),
-#             nn.Linear(128, 1),
-#             nn.Sigmoid()
-#         )
-#
-#     def forward(self, image, label):
-#         x = self.net(image).view(batchsz, -1)
-#         y = self.fc1(label)
-#         x = torch.cat([x, y], 1)
-#         x = self.fc2(x)
-#         return x
 
 
 class Discriminator(nn.Module):
@@ -155,56 +92,78 @@ def main():
     optim_D = optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
     optim_G = optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
 
-    img, lab = load_mnist(os.path.join(os.getcwd(), 'mnist'))
-    data_itr = data_generator(img, lab)
-    for epoch in range(8002):
-        # Train Discriminator
-        image, label = next(data_itr)
-        image = torch.FloatTensor(image).cuda().view(batchsz, 1, 28, 28)
-        image = (image - 127.5)/127.5
-        label = torch.from_numpy(label).type(torch.LongTensor).cuda()
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
+    train_loader = torch.utils.data.DataLoader(
+        datasets.MNIST('data', train=True, download=True, transform=transform),
+        batch_size=128, shuffle=True)
 
-        y_real_ = torch.ones(batchsz).cuda()
-        y_fake_ = torch.zeros(batchsz).cuda()
-        y_label_ = torch.zeros(batchsz, 10).cuda()
-        y_label_.scatter_(1, label.view(batchsz, 1), 1)
+    for epoch in range(102):
+        # learning rate decay
+        if (epoch + 1) == 11:
+            optim_G.param_groups[0]['lr'] /= 10
+            optim_D.param_groups[0]['lr'] /= 10
+            print("learning rate change!")
 
-        # train discriminator D
-        optim_D.zero_grad()
-        D_result = D(image, y_label_).squeeze()
-        D_real_loss = BCE_loss(D_result, y_real_)       # real loss
+        if (epoch + 1) == 16:
+            optim_G.param_groups[0]['lr'] /= 10
+            optim_D.param_groups[0]['lr'] /= 10
+            print("learning rate change!")
 
-        z_ = torch.randn((batchsz, 100)).cuda()
-        y_ = (torch.rand(batchsz, 1) * 10).type(torch.LongTensor).squeeze().cuda()
-        y_label_ = torch.zeros(batchsz, 10).cuda()
-        y_label_.scatter_(1, y_.view(batchsz, 1), 1)
+        for image, label in train_loader:
+            if batchsz != int(image.size()[0]):
+                continue
+            # Train Discriminator
+            image = torch.FloatTensor(image).cuda().view(batchsz, 1, 28, 28)
+            label = label.type(torch.LongTensor).cuda()
 
-        G_result = G(z_, y_label_)
-        D_result = D(G_result, y_label_).squeeze()
-        D_fake_loss = BCE_loss(D_result, y_fake_)       # fake loss
+            y_real_ = torch.ones(batchsz).cuda()
+            y_fake_ = torch.zeros(batchsz).cuda()
+            y_label_ = torch.zeros(batchsz, 10).cuda()
+            y_label_.scatter_(1, label.view(batchsz, 1), 1)
 
-        D_train_loss = D_real_loss + D_fake_loss
-        D_train_loss.backward()
-        optim_D.step()
+            # train discriminator D
+            optim_D.zero_grad()
+            D_result = D(image, y_label_).squeeze()
+            D_real_loss = BCE_loss(D_result, y_real_)       # real loss
 
-        # train generator G
-        optim_G.zero_grad()
+            z_ = torch.randn((batchsz, 100)).cuda()
+            y_ = (torch.rand(batchsz, 1) * 10).type(torch.LongTensor).squeeze().cuda()
+            y_label_ = torch.zeros(batchsz, 10).cuda()
+            y_label_.scatter_(1, y_.view(batchsz, 1), 1)
 
-        z_ = torch.randn((batchsz, 100)).cuda()
-        y_ = (torch.rand(batchsz, 1) * 10).type(torch.LongTensor).squeeze().cuda()
-        y_label_ = torch.zeros(batchsz, 10).cuda()
-        y_label_.scatter_(1, y_.view(batchsz, 1), 1)
+            G_result = G(z_, y_label_)
+            D_result = D(G_result, y_label_).squeeze()
+            D_fake_loss = BCE_loss(D_result, y_fake_)       # fake loss
 
-        G_result = G(z_, y_label_)
-        D_result = D(G_result, y_label_).squeeze()
-        G_train_loss = BCE_loss(D_result, y_real_)
+            D_train_loss = D_real_loss + D_fake_loss
+            D_train_loss.backward()
+            optim_D.step()
 
-        G_train_loss.backward()
-        optim_G.step()
+            # train generator G
+            optim_G.zero_grad()
 
-        if epoch % 100 == 0:
+            z_ = torch.randn((batchsz, 100)).cuda()
+            y_ = (torch.rand(batchsz, 1) * 10).type(torch.LongTensor).squeeze().cuda()
+            y_label_ = torch.zeros(batchsz, 10).cuda()
+            y_label_.scatter_(1, y_.view(batchsz, 1), 1)
+
+            G_result = G(z_, y_label_)
+            D_result = D(G_result, y_label_).squeeze()
+            G_train_loss = BCE_loss(D_result, y_real_)
+
+            G_train_loss.backward()
+            optim_G.step()
+
+        if epoch % 10 == 0:
             print("Epoch:%d, LossD:%.4f, LossG:%.4f." % (epoch+1, D_train_loss, G_train_loss))
             with torch.no_grad():
+                z_ = torch.randn((batchsz, 100)).cuda()
+                y_ = (torch.rand(batchsz, 1) * 10).type(torch.LongTensor).squeeze().cuda()
+                y_label_ = torch.zeros(batchsz, 10).cuda()
+                y_label_.scatter_(1, y_.view(batchsz, 1), 1)
                 gen_data = G(z_, y_label_).detach().cpu()
             plt.figure(figsize=(10, 10))
             plt.axis("off")
@@ -212,6 +171,8 @@ def main():
             plt.pause(0.5)
             plt.savefig("epoch%d.jpg" % epoch)
             plt.close('all')
+            torch.save(G.state_dict(), os.path.join(os.getcwd(), 'gen%d.pth' % epoch))
+            torch.save(D.state_dict(), os.path.join(os.getcwd(), 'dis%d.pth' % epoch))
 
     torch.save(G.state_dict(), os.path.join(os.getcwd(), 'gen.pth'))
     torch.save(D.state_dict(), os.path.join(os.getcwd(), 'dis.pth'))
